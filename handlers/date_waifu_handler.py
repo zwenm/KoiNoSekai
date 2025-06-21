@@ -1,26 +1,20 @@
-import json
-import os
-from pathlib import Path
-from utils.date import start_date_session, create_gemini_chat_session
-from utils.gemini import get_gemini_chat_response
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, CommandHandler, CallbackQueryHandler, filters
+
+from db import get_waifus_by_user, get_waifu_by_id, delete_waifu_by_id
+from utils.date import start_date_session, create_gemini_chat_session
+from utils.gemini import get_gemini_chat_response
 from templates.message import (
     DATE_START_NO_WAIFU, DATE_START_CHOOSE_WAIFU, DATE_WAIFU_SELECTED,
     DATE_END_MESSAGE, DATE_ERROR_GENERAL, DATE_ERROR_GEMINI
 )
-from config import WAIFU_DATA_FILE
 
 CHOOSE_WAIFU, DATING, CONFIRM_DELETE = range(3)
 
-def load_waifu_data():
-    if os.path.exists(WAIFU_DATA_FILE):
-        with open(WAIFU_DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
-
+# Start Date
 async def date_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    waifu_list = load_waifu_data()
+    user_id = update.message.from_user.id
+    waifu_list = get_waifus_by_user(user_id)
 
     if not waifu_list:
         await update.message.reply_text(
@@ -32,69 +26,25 @@ async def date_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     keyboard = [
         [
-            InlineKeyboardButton(f"❤️ {waifu['name']}", callback_data=f"select_waifu_{waifu['id']}"),
-            InlineKeyboardButton("🗑️", callback_data=f"delete_waifu_{waifu['id']}")
+            InlineKeyboardButton(f"❤️ {waifu[2]}", callback_data=f"select_waifu_{waifu[0]}"),
+            InlineKeyboardButton("🗑️", callback_data=f"delete_waifu_{waifu[0]}")
         ]
         for waifu in waifu_list
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(DATE_START_CHOOSE_WAIFU, reply_markup=reply_markup)
+
+    await update.message.reply_text(
+        DATE_START_CHOOSE_WAIFU,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return CHOOSE_WAIFU
 
-def save_waifu_data(data):
-    with open(WAIFU_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-async def handle_delete_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "confirm_delete_yes":
-        waifu_id = context.user_data.get("waifu_to_delete")
-        waifu_list = load_waifu_data()
-
-        waifu_index = next((i for i, w in enumerate(waifu_list) if str(w['id']) == waifu_id), None)
-        if waifu_index is None:
-            await query.edit_message_text("Waifu tidak ditemukan.")
-            return ConversationHandler.END
-
-        deleted_waifu = waifu_list.pop(waifu_index)
-        save_waifu_data(waifu_list)
-
-        await query.edit_message_text(f"✅ Waifu *{deleted_waifu['name']}* berhasil dihapus.", parse_mode="Markdown")
-        context.user_data.pop("waifu_to_delete", None)
-        return ConversationHandler.END
-
-    elif query.data == "confirm_delete_cancel":
-        await query.edit_message_text("❎ Penghapusan dibatalkan.")
-        context.user_data.pop("waifu_to_delete", None)
-        return ConversationHandler.END
-
-async def delete_waifu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-
-    waifu_id = query.data.split('_')[-1]
-    waifu_list = load_waifu_data()
-
-    waifu_index = next((i for i, w in enumerate(waifu_list) if str(w['id']) == waifu_id), None)
-    if waifu_index is None:
-        await query.edit_message_text("Waifu tidak ditemukan.")
-        return ConversationHandler.END
-
-    deleted_waifu = waifu_list.pop(waifu_index)
-    save_waifu_data(waifu_list)
-
-    await query.edit_message_text(f"✅ Waifu *{deleted_waifu['name']}* berhasil dihapus.", parse_mode='Markdown')
-    return ConversationHandler.END
-
+# Konfirmasi Penghapusan
 async def confirm_delete_waifu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
     waifu_id = query.data.split('_')[-1]
-    waifu_list = load_waifu_data()
-    waifu = next((w for w in waifu_list if str(w['id']) == waifu_id), None)
+    waifu = get_waifu_by_id(waifu_id)
 
     if not waifu:
         await query.edit_message_text("Waifu tidak ditemukan.")
@@ -102,96 +52,116 @@ async def confirm_delete_waifu(update: Update, context: ContextTypes.DEFAULT_TYP
 
     context.user_data['waifu_to_delete'] = waifu_id
 
-    keyboard = InlineKeyboardMarkup([
+    keyboard = [
         [InlineKeyboardButton("❗Ya, Hapus", callback_data="confirm_delete_yes")],
-        [InlineKeyboardButton("Batal Hapus", callback_data="confirm_delete_cancel")]
-    ])
+        [InlineKeyboardButton("Batal", callback_data="confirm_delete_cancel")]
+    ]
+
     await query.edit_message_text(
-        f"Apakah kamu yakin ingin menghapus waifu *{waifu['name']}*? 🗑️",
+        f"Apakah kamu yakin ingin menghapus waifu *{waifu[2]}*? 🗑️",
         parse_mode="Markdown",
-        reply_markup=keyboard
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return CONFIRM_DELETE
 
-async def select_waifu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# Eksekusi Penghapusan
+async def handle_delete_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
-    waifu_id = query.data.split('_')[-1]
-    waifu_list = load_waifu_data()
-    selected_waifu = next((w for w in waifu_list if str(w['id']) == waifu_id), None)
+    if query.data == "confirm_delete_yes":
+        waifu_id = context.user_data.get("waifu_to_delete")
+        waifu = get_waifu_by_id(waifu_id)
+        if waifu:
+            delete_waifu_by_id(waifu_id)
+            await query.edit_message_text(
+                f"✅ Waifu *{waifu[2]}* berhasil dihapus.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text("Waifu tidak ditemukan.")
+    else:
+        await query.edit_message_text("Penghapusan dibatalkan.")
 
-    if not selected_waifu:
+    context.user_data.pop("waifu_to_delete", None)
+    return ConversationHandler.END
+
+# Memilih Waifu
+async def select_waifu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    waifu_id = query.data.split('_')[-1]
+    waifu = get_waifu_by_id(waifu_id)
+
+    if not waifu:
         await query.edit_message_text(DATE_ERROR_GENERAL)
         return ConversationHandler.END
 
-    start_date_session(context, selected_waifu)
+    waifu_data = {
+        "id": waifu[0],
+        "telegram_user_id": waifu[1],
+        "name": waifu[2],
+        "age": waifu[3],
+        "personality": waifu[4],
+        "background": waifu[5],
+        "image_path": waifu[6]
+    }
 
-    context.user_data['current_dating_waifu'] = selected_waifu
+    start_date_session(context, waifu_data)
+    context.user_data['current_dating_waifu'] = waifu_data
     context.user_data['gemini_chat_session'] = create_gemini_chat_session(
-        selected_waifu['name'],
-        selected_waifu['personality'],
-        selected_waifu['background']
+        waifu_data["name"],
+        waifu_data["personality"],
+        waifu_data["background"]
     )
 
-    keyboard = ReplyKeyboardMarkup([["Akhiri Kencan"]], resize_keyboard=True, one_time_keyboard=False)
-    await query.edit_message_text(DATE_WAIFU_SELECTED.format(waifu_name=selected_waifu['name']))
+    keyboard = ReplyKeyboardMarkup([["Akhiri Kencan"]], resize_keyboard=True)
+    await query.edit_message_text(DATE_WAIFU_SELECTED.format(waifu_name=waifu_data['name']))
     await context.bot.send_message(
         chat_id=query.message.chat_id,
-        text=f"Kamu bisa mulai ngobrol sekarang dengan {selected_waifu['name']} ❤️",
+        text=f"Kamu bisa mulai ngobrol sekarang dengan {waifu_data['name']} ❤️",
         reply_markup=keyboard
     )
     return DATING
 
+# Proses Chat Saat Dating
 async def handle_dating_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_message = update.message.text
-    selected_waifu = context.user_data.get('current_dating_waifu')
+    waifu = context.user_data.get('current_dating_waifu')
     chat_session = context.user_data.get('gemini_chat_session')
 
-    if not selected_waifu or not chat_session:
+    if not waifu or not chat_session:
         await update.message.reply_text(DATE_ERROR_GENERAL)
         return ConversationHandler.END
 
+    user_message = update.message.text
     gemini_response = get_gemini_chat_response(
-        chat_session,
-        user_message,
-        selected_waifu['name'],
-        selected_waifu['personality'],
-        selected_waifu['background']
+        chat_session, user_message,
+        waifu['name'], waifu['personality'], waifu['background']
     )
 
     if gemini_response:
-        MAX_LENGTH = 4000
-        await update.message.reply_text(f"{selected_waifu['name']}: {gemini_response[:MAX_LENGTH]}")
+        await update.message.reply_text(f"{waifu['name']}: {gemini_response[:4000]}")
     else:
         await update.message.reply_text(DATE_ERROR_GEMINI)
 
     return DATING
 
+# Mengakhiri Kencan
 async def end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    selected_waifu = context.user_data.get('current_dating_waifu')
-    chat_session = context.user_data.get('gemini_chat_session')
+    waifu = context.user_data.pop('current_dating_waifu', None)
+    chat_session = context.user_data.pop('gemini_chat_session', None)
 
-    if selected_waifu and chat_session:
-        farewell_prompt = (
-            "Waktunya mengakhiri sesi kencan hari ini. "
-            "Sampaikan salam perpisahan yang manis dan bersahabat kepada pengguna."
-        )
+    if waifu and chat_session:
         try:
-            farewell_response = get_gemini_chat_response(
+            farewell = get_gemini_chat_response(
                 chat_session,
-                farewell_prompt,
-                selected_waifu['name'],
-                selected_waifu['personality'],
-                selected_waifu['background']
+                "Waktunya mengakhiri sesi kencan. Sampaikan salam manis dan perpisahan kepada user.",
+                waifu['name'], waifu['personality'], waifu['background']
             )
-            if farewell_response:
-                await update.message.reply_text(f"{selected_waifu['name']}: {farewell_response}")
+            if farewell:
+                await update.message.reply_text(f"{waifu['name']}: {farewell}")
         except Exception as e:
-            print(f"Gagal mengirim pesan perpisahan: {e}")
-
-    context.user_data.pop('current_dating_waifu', None)
-    context.user_data.pop('gemini_chat_session', None)
+            print(f"Gagal menyampaikan perpisahan: {e}")
 
     await update.message.reply_text(
         f"{DATE_END_MESSAGE}\n\nSilakan pilih:\n"
@@ -201,23 +171,24 @@ async def end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return ConversationHandler.END
 
+# Handler
 date_waifu_conv_handler = ConversationHandler(
     entry_points=[CommandHandler("date_waifu", date_start)],
     states={
         CHOOSE_WAIFU: [
-            CallbackQueryHandler(select_waifu, pattern='^select_waifu_'),
-            CallbackQueryHandler(confirm_delete_waifu, pattern='^delete_waifu_'),
-        ],
-        DATING: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^Akhiri Kencan$"), end_date),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_dating_message),
+            CallbackQueryHandler(select_waifu, pattern="^select_waifu_"),
+            CallbackQueryHandler(confirm_delete_waifu, pattern="^delete_waifu_"),
         ],
         CONFIRM_DELETE: [
-            CallbackQueryHandler(handle_delete_confirmation, pattern="^confirm_delete_"),
+            CallbackQueryHandler(handle_delete_confirmation, pattern="^confirm_delete_")
         ],
+        DATING: [
+            MessageHandler(filters.Regex("^Akhiri Kencan$"), end_date),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_dating_message)
+        ]
     },
     fallbacks=[
         CommandHandler("cancel", end_date),
-        CommandHandler("end_date", end_date),
+        CommandHandler("end_date", end_date)
     ],
 )
